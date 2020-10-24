@@ -1,0 +1,7 @@
+/.pio
+/.vscode
+
+# Those are currently empty, so exclude for now
+/include
+/lib
+/test
