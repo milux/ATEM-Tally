@@ -7,12 +7,12 @@ const int PROGRAM = 2;
 const int PIN_PREVIEW = 2;
 const int PIN_PROGRAM = 15;
 
-const char *SSID = "FCG Regensburg";
-const IPAddress IP(192, 168, 77, 30);
+const char* TALLY_DNS = "tally.local";
 const int PORT = 7411;
 const bool USE_PREVIEW = true;
 const uint8_t LISTEN_INPUT = 3;
 
+IPAddress tallyIp;
 WiFiClient client;
 
 void setup() {
@@ -23,17 +23,36 @@ void setup() {
 
   Serial.println();
   Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(SSID);
 
-  WiFi.begin(SSID);
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; ++i) {
+    if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
+      String ssid = WiFi.SSID(i);
+      Serial.print("Trying open network ");
+      Serial.print(ssid);
+      Serial.print(":");
+      WiFi.begin(ssid.c_str());
+      while (WiFi.status() != WL_CONNECTED) {
+        delay(50);
+        Serial.print(".");
+      }
+      Serial.println(" connected!");
+      int err = WiFi.hostByName(TALLY_DNS, tallyIp);
+      if (err == 1) {
+        Serial.print("Found IP address: ");
+        Serial.println(tallyIp);
+        break;
+      } else {
+        Serial.print("Error code: ");
+        Serial.println(err);
+      }
+    } else {
+      Serial.print("Skipping encrypted network ");
+      Serial.println(WiFi.SSID(i));
+    }
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(50);
-    Serial.print(".");
+    delay(10000);
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
 
   Serial.print("Local IP address: ");
   Serial.println(WiFi.localIP());
@@ -43,11 +62,12 @@ void setup() {
 void loop() {
   if (!client.connected()) {
     Serial.print("Connecting to ");
-    Serial.print(IP);
+    Serial.print(tallyIp);
     Serial.print(":");
     Serial.println(PORT);
-    if (!client.connect(IP, PORT)) {
+    if (!client.connect(tallyIp, PORT)) {
       Serial.println("Connection failed.");
+      delay(5000);
       return;
     } else {
       Serial.println("Connection established.");
