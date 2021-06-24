@@ -1,17 +1,30 @@
-import { AtemTallyMonitor } from "./atemTallyMonitor";
 import { TallyState } from "./tallyState";
 import { Atem } from "atem-connection";
 import { createServer, Socket } from "net";
+import { lookup } from "dns";
 
 const PORT = 7411;
+const ATEM_DNS = 'atem.mk';
 
 const atem = new Atem();
-const monitors = new Map<number, AtemTallyMonitor>();
+const lastStates = new Map<number, TallyState>();
+const socketSets = new Map<number, Set<Socket>>();
 const usedInputs = new Map<string, number>();
-const monitorRefCount = new Map<number, number>();
 
 atem.on('error', console.error);
-atem.connect('192.168.77.65');
+// Manually resolve IP address to prevent empic reconnect fuckup of atem-connect
+const doLookup = () => {
+    lookup(ATEM_DNS, (error, address) => {
+        if (error) {
+            console.error(`Error on DNS lookup for ${ATEM_DNS}, retry after 1 second, error message: `, error);
+            setTimeout(doLookup, 1000);
+        } else {
+            console.log(`${ATEM_DNS} resolved to ${address}, connecting ATEM...`)
+            atem.connect(address);
+        }
+    });
+};
+doLookup();
 
 const sendState = (state: TallyState, socket: Socket) => {
     try {
@@ -22,43 +35,63 @@ const sendState = (state: TallyState, socket: Socket) => {
     }
 };
 
+const getState = (input: number): TallyState => {
+    const previewSet = new Set(atem.listVisibleInputs("preview"));
+    const programSet = new Set(atem.listVisibleInputs("program"));
+    if (programSet.has(input)) {
+        return TallyState.PROGRAM;
+    } else if (previewSet.has(input)) {
+        return TallyState.PREVIEW;
+    } else {
+        return TallyState.INACTIVE;
+    }
+}
+
+const updateStates = () => {
+    const previewSet = new Set(atem.listVisibleInputs("preview"));
+    const programSet = new Set(atem.listVisibleInputs("program"));
+    // console.log("previews", previewSet);
+    // console.log("programs", programSet);
+    const handleState = (cam: number, state: TallyState, stateDescription: string) => {
+        if (lastStates.get(cam) !== state) {
+            console.log(`>>> Input # ${cam}: ${stateDescription}`);
+            lastStates.set(cam, state);
+            socketSets.get(cam)?.forEach((socket) => sendState(state, socket));
+        }
+    };
+    for (const cam of Array.from(socketSets.keys())) {
+        if (programSet.has(cam)) {
+            handleState(cam, TallyState.PROGRAM, "Program State");
+        } else if (previewSet.has(cam)) {
+            handleState(cam, TallyState.PREVIEW, "Preview State");
+        } else {
+            handleState(cam, TallyState.INACTIVE, "Inactive State");
+        }
+    }
+};
+
 atem.on('connected', () => {
+    atem.on('stateChanged', updateStates);
+
     createServer((socket) => {
-        const clientIdent = socket.remoteAddress + ':' + socket.remotePort;
-        const stateChangeHandler = (state: TallyState) => sendState(state, socket);
-        console.log('CONNECTED: ' + clientIdent);
+        const clientIdent = `${socket.remoteAddress} + ':' + ${socket.remotePort}`;
+        console.log(`CONNECTED: ${clientIdent}`);
 
         socket.once('data', function (data) {
-            console.log('DATA ' + clientIdent + ': ' + data[0]);
+            console.log(`DATA on ${clientIdent}: ${data[0]}`);
             const input = data[0];
             if (input > 10) {
                 throw new Error(`Invalid input # ${input}`);
             } else {
                 console.log(`Watching input ${input}`);
                 usedInputs.set(clientIdent, input);
-                monitorRefCount.set(input, (monitorRefCount.get(input) || 0) + 1)
-                let tally = monitors.get(input);
-                if (tally === undefined) {
-                    tally = new AtemTallyMonitor(atem, input);
-                    tally.on('stateChange', (state) => {
-                        switch (state) {
-                            case TallyState.INACTIVE:
-                                console.log(`>>> Input # ${input}: Inactive State`);
-                                break;
-                            case TallyState.PREVIEW:
-                                console.log(`>>> Input # ${input}: Preview State`);
-                                break;
-                            case TallyState.PROGRAM:
-                                console.log(`>>> Input # ${input}: Program State`);
-                                break;
-                            default:
-                                throw new Error('Unknown State!');
-                        }
-                    });
-                    monitors.set(input, tally);
+                if (!socketSets.has(input)) {
+                    socketSets.set(input, new Set());
+                    // Obtain and remember initial state
+                    lastStates.set(input, getState(input));
                 }
-                tally.on('stateChange', stateChangeHandler);
-                sendState(tally.currentTallyState, socket);
+                socketSets.get(input)?.add(socket);
+                sendState(lastStates.get(input) ?? TallyState.INACTIVE, socket);
             }
         });
 
@@ -71,17 +104,18 @@ atem.on('connected', () => {
             const input = usedInputs.get(clientIdent);
             usedInputs.delete(clientIdent);
             if (input) {
-                monitors.get(input)?.off('stateChange', stateChangeHandler);
-                const refCount = (monitorRefCount.get(input) || 1) - 1;
-                if (refCount === 0) {
-                    monitors.get(input)?.destroy()
-                    monitors.delete(input);
-                    console.log(`Removed monitor for input # ${input}, reference count was 0.`);
+                socketSets.get(input)?.delete(socket);
+                // Cleanup
+                if (socketSets.get(input)?.size === 0) {
+                    socketSets.delete(input);
+                    lastStates.delete(input);
+                    console.log(`Stop watching input # ${input}, no client sockets left.`);
                 }
             }
             console.log(`CLOSED: ${clientIdent} (${hadError ? 'with error' : 'clean'})`);
         });
     }).listen(PORT, '0.0.0.0', () => {
-        console.log('TCP Server is listening on port ' + PORT + '.');
+        console.log(`TCP Server is listening on port ${PORT}.`);
     });
 });
+ 
