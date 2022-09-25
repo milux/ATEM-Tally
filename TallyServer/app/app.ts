@@ -3,13 +3,16 @@ import { Atem } from "atem-connection";
 import { createServer, Socket } from "net";
 import { lookup } from "dns";
 
+const KEEP_ALIVE_MS = 3600_000;
 const PORT = 7411;
 const ATEM_DNS = 'atem.mk';
 
 const atem = new Atem();
 const lastStates = new Map<number, TallyState>();
+const keepAliveTimeouts = new Map<Socket, NodeJS.Timeout>();
 const socketSets = new Map<number, Set<Socket>>();
-const usedInputs = new Map<string, number>();
+const newFormatSockets = new Set<Socket>();
+const usedInputs = new Map<string, Set<number>>();
 
 atem.on('error', console.error);
 // Manually resolve IP address to prevent empic reconnect fuckup of atem-connect
@@ -26,10 +29,17 @@ const doLookup = () => {
 };
 doLookup();
 
-const sendState = (state: TallyState, socket: Socket) => {
+const sendState = (cam: number, state: TallyState, socket: Socket) => {
     try {
-        const stateData = Uint8Array.from([state]);
-        socket.write(stateData);
+        if (newFormatSockets.has(socket)) {
+            // For new format sockets: Send camera number and state
+            socket.write(Uint8Array.from([cam, state]));
+        } else if (state === TallyState.PREVIEW_PROGRAM) {
+            // For old format sockets: Convert PREVIEW_PROGRAM to PROGRAM
+            socket.write(Uint8Array.from([TallyState.PROGRAM]));
+        } else {
+            socket.write(Uint8Array.from([state]));
+        }
     } catch(e) {
         console.error(e);
     }
@@ -39,13 +49,28 @@ const getState = (input: number): TallyState => {
     const previewSet = new Set(atem.listVisibleInputs("preview"));
     const programSet = new Set(atem.listVisibleInputs("program"));
     if (programSet.has(input)) {
-        return TallyState.PROGRAM;
+        if (previewSet.has(input)) {
+            return TallyState.PREVIEW_PROGRAM
+        } else {
+            return TallyState.PROGRAM;
+        }
     } else if (previewSet.has(input)) {
         return TallyState.PREVIEW;
     } else {
         return TallyState.INACTIVE;
     }
 }
+
+const refreshKeepAlive = (socket: Socket) => {
+    const timeout = keepAliveTimeouts.get(socket);
+    if (timeout) {
+        clearTimeout(timeout)
+    }
+    keepAliveTimeouts.set(socket, setTimeout(() => {
+        sendState(0xff, 0xff, socket);
+        refreshKeepAlive(socket);
+    }, KEEP_ALIVE_MS));
+};
 
 const updateStates = () => {
     const previewSet = new Set(atem.listVisibleInputs("preview"));
@@ -56,12 +81,16 @@ const updateStates = () => {
         if (lastStates.get(cam) !== state) {
             console.log(`>>> Input # ${cam}: ${stateDescription}`);
             lastStates.set(cam, state);
-            socketSets.get(cam)?.forEach((socket) => sendState(state, socket));
+            socketSets.get(cam)?.forEach((socket) => sendState(cam, state, socket));
         }
     };
     for (const cam of Array.from(socketSets.keys())) {
         if (programSet.has(cam)) {
-            handleState(cam, TallyState.PROGRAM, "Program State");
+            if (previewSet.has(cam)) {
+                handleState(cam, TallyState.PREVIEW_PROGRAM, "Preview & Program State");
+            } else {
+                handleState(cam, TallyState.PROGRAM, "Program State");
+            }
         } else if (previewSet.has(cam)) {
             handleState(cam, TallyState.PREVIEW, "Preview State");
         } else {
@@ -74,25 +103,36 @@ atem.on('connected', () => {
     atem.on('stateChanged', updateStates);
 
     createServer((socket) => {
-        const clientIdent = `${socket.remoteAddress} + ':' + ${socket.remotePort}`;
+        const clientIdent = `${socket.remoteAddress}:${socket.remotePort}`;
         console.log(`CONNECTED: ${clientIdent}`);
 
         socket.once('data', function (data) {
-            console.log(`DATA on ${clientIdent}: ${data[0]}`);
-            const input = data[0];
-            if (input > 10) {
-                throw new Error(`Invalid input # ${input}`);
+            console.log(`DATA on ${clientIdent}: ${(data).toString('hex')}`);
+            const newFormat = data[0] === 0xff;
+            // In the new format, the second byte contains the number of inputs to watch
+            const inputs = new Set<number>();
+            if (newFormat) {
+                for (let i = 0; i < data[1]; i++) {
+                    inputs.add(data[i + 2]);
+                }
+                console.log(`Watching inputs (new format) ${Array.from(inputs).join(', ')}`);
+                newFormatSockets.add(socket);
+                refreshKeepAlive(socket);
             } else {
-                console.log(`Watching input ${input}`);
-                usedInputs.set(clientIdent, input);
+                // In the old format, the first byte is the one and only input to watch
+                inputs.add(data[0]);
+                console.log(`Watching input ${data[0]}`);
+            }
+            usedInputs.set(clientIdent, inputs);
+            inputs.forEach((input) => {
                 if (!socketSets.has(input)) {
                     socketSets.set(input, new Set());
                     // Obtain and remember initial state
                     lastStates.set(input, getState(input));
                 }
                 socketSets.get(input)?.add(socket);
-                sendState(lastStates.get(input) ?? TallyState.INACTIVE, socket);
-            }
+                sendState(input, lastStates.get(input)!, socket);
+            });
         });
 
         socket.on('error', (err) => {
@@ -101,16 +141,22 @@ atem.on('connected', () => {
 
         // Add a 'close' event handler to this instance of socket
         socket.on('close', (hadError) => {
-            const input = usedInputs.get(clientIdent);
+            if (newFormatSockets.has(socket)) {
+                newFormatSockets.delete(socket);
+                keepAliveTimeouts.delete(socket);
+            }
+            const inputs = usedInputs.get(clientIdent);
             usedInputs.delete(clientIdent);
-            if (input) {
-                socketSets.get(input)?.delete(socket);
-                // Cleanup
-                if (socketSets.get(input)?.size === 0) {
-                    socketSets.delete(input);
-                    lastStates.delete(input);
-                    console.log(`Stop watching input # ${input}, no client sockets left.`);
-                }
+            if (inputs) {
+                inputs.forEach((input) => {
+                    socketSets.get(input)?.delete(socket);
+                    // Cleanup input watching when no more sockets left
+                    if (socketSets.get(input)?.size === 0) {
+                        socketSets.delete(input);
+                        lastStates.delete(input);
+                        console.log(`Stop watching input # ${input}, no client sockets left.`);
+                    }
+                });
             }
             console.log(`CLOSED: ${clientIdent} (${hadError ? 'with error' : 'clean'})`);
         });
