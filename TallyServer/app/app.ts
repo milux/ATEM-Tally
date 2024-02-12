@@ -3,19 +3,25 @@ import { Atem } from "atem-connection";
 import { createServer, Socket } from "net";
 import { lookup } from "dns";
 
-const KEEP_ALIVE_MS = 3600_000;
 const PORT = 7411;
-const ATEM_DNS = 'atem.mk';
+const ATEM_DNS = 'atem.internal';
 
 const atem = new Atem();
 const lastStates = new Map<number, TallyState>();
-const keepAliveTimeouts = new Map<Socket, NodeJS.Timeout>();
 const socketSets = new Map<number, Set<Socket>>();
 const newFormatSockets = new Set<Socket>();
 const usedInputs = new Map<string, Set<number>>();
+const legacyMap: Map<number, number> = new Map([
+    [4, 1],
+    [5, 2],
+    [3, 3]
+]);
 
 atem.on('error', console.error);
-// Manually resolve IP address to prevent empic reconnect fuckup of atem-connect
+atem.on('info', console.log);
+atem.on('debug', console.log);
+
+// Manually resolve IP address to prevent epic reconnect fuckup of atem-connect
 const doLookup = () => {
     lookup(ATEM_DNS, (error, address) => {
         if (error) {
@@ -27,7 +33,6 @@ const doLookup = () => {
         }
     });
 };
-doLookup();
 
 const sendState = (cam: number, state: TallyState, socket: Socket) => {
     try {
@@ -60,17 +65,6 @@ const getState = (input: number): TallyState => {
         return TallyState.INACTIVE;
     }
 }
-
-const refreshKeepAlive = (socket: Socket) => {
-    const timeout = keepAliveTimeouts.get(socket);
-    if (timeout) {
-        clearTimeout(timeout)
-    }
-    keepAliveTimeouts.set(socket, setTimeout(() => {
-        sendState(0xff, 0xff, socket);
-        refreshKeepAlive(socket);
-    }, KEEP_ALIVE_MS));
-};
 
 const updateStates = () => {
     const previewSet = new Set(atem.listVisibleInputs("preview"));
@@ -106,7 +100,10 @@ atem.on('connected', () => {
         const clientIdent = `${socket.remoteAddress}:${socket.remotePort}`;
         console.log(`CONNECTED: ${clientIdent}`);
 
-        socket.once('data', function (data) {
+        // Disable sending delay to improve responsiveness
+        socket.setNoDelay(true);
+
+        socket.once('data', (data) => {
             console.log(`DATA on ${clientIdent}: ${(data).toString('hex')}`);
             const newFormat = data[0] === 0xff;
             // In the new format, the second byte contains the number of inputs to watch
@@ -117,11 +114,16 @@ atem.on('connected', () => {
                 }
                 console.log(`Watching inputs (new format) ${Array.from(inputs).join(', ')}`);
                 newFormatSockets.add(socket);
-                refreshKeepAlive(socket);
             } else {
                 // In the old format, the first byte is the one and only input to watch
-                inputs.add(data[0]);
-                console.log(`Watching input ${data[0]}`);
+                const mappedInput = legacyMap.get(data[0]);
+                if (mappedInput) {
+                    inputs.add(mappedInput);
+                    console.log(`Watching input ${mappedInput} (mapped from ${data[0]})`);
+                } else {
+                    inputs.add(data[0]);
+                    console.log(`Watching input ${data[0]} (unmapped)`);
+                }
             }
             usedInputs.set(clientIdent, inputs);
             inputs.forEach((input) => {
@@ -133,6 +135,8 @@ atem.on('connected', () => {
                 socketSets.get(input)?.add(socket);
                 sendState(input, lastStates.get(input)!, socket);
             });
+            // Register echo-handler for keep-alive replies
+            socket.on('data', (data) => socket.write(data));
         });
 
         socket.on('error', (err) => {
@@ -143,7 +147,6 @@ atem.on('connected', () => {
         socket.on('close', (hadError) => {
             if (newFormatSockets.has(socket)) {
                 newFormatSockets.delete(socket);
-                keepAliveTimeouts.delete(socket);
             }
             const inputs = usedInputs.get(clientIdent);
             usedInputs.delete(clientIdent);
@@ -164,4 +167,6 @@ atem.on('connected', () => {
         console.log(`TCP Server is listening on port ${PORT}.`);
     });
 });
- 
+
+// Do IP lookup and connect to ATEM
+doLookup();
