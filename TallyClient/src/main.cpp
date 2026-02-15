@@ -4,13 +4,14 @@
 const int INACTIVE = 0;
 const int PREVIEW = 1;
 const int PROGRAM = 2;
+const int PREVIEW_PROGRAM = 3;
 const int PIN_PREVIEW = 2;
 const int PIN_PROGRAM = 15;
 
-const char* TALLY_DNS = "tally.local";
+const char* TALLY_DNS = "tally.internal";
 const int PORT = 7411;
 const bool USE_PREVIEW = true;
-const uint8_t LISTEN_INPUT = 3;
+const uint8_t LISTEN_INPUT = 2;
 
 IPAddress tallyIp;
 WiFiClient client;
@@ -24,34 +25,43 @@ void setup() {
   Serial.println();
   Serial.println();
 
-  int n = WiFi.scanNetworks();
-  for (int i = 0; i < n; ++i) {
-    if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
-      String ssid = WiFi.SSID(i);
-      Serial.print("Trying open network ");
-      Serial.print(ssid);
-      Serial.print(":");
-      WiFi.begin(ssid.c_str());
-      while (WiFi.status() != WL_CONNECTED) {
-        delay(50);
-        Serial.print(".");
-      }
-      Serial.println(" connected!");
-      int err = WiFi.hostByName(TALLY_DNS, tallyIp);
-      if (err == 1) {
-        Serial.print("Found IP address: ");
-        Serial.println(tallyIp);
-        break;
+  // Scan available open WiFis until the tally monitor is found
+  for (bool scanSuccessful = false; !scanSuccessful; ) {
+    int n = WiFi.scanNetworks();
+    for (int i = 0; i < n; ++i) {
+      if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
+        String ssid = WiFi.SSID(i);
+        Serial.print("Trying open network ");
+        Serial.print(ssid);
+        WiFi.begin(ssid.c_str());
+        // ~ 1 second WiFi connect timeout
+        for (int i = 0; WiFi.status() != WL_CONNECTED && i < 20; ++i) {
+          delay(50);
+          Serial.print(".");
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          Serial.println(" connected!");
+          int res = WiFi.hostByName(TALLY_DNS, tallyIp);
+          if (res == 1) {
+            Serial.print("Found IP address: ");
+            Serial.println(tallyIp);
+            scanSuccessful = true;
+            break;
+          } else {
+            Serial.print("Error code: ");
+            Serial.println(res);
+          }
+        } else {
+          Serial.println(" timed out, skipping...");
+          continue;
+        }
       } else {
-        Serial.print("Error code: ");
-        Serial.println(err);
+        Serial.print("Skipping encrypted network ");
+        Serial.println(WiFi.SSID(i));
       }
-    } else {
-      Serial.print("Skipping encrypted network ");
-      Serial.println(WiFi.SSID(i));
-    }
 
-    delay(10000);
+      delay(10000);
+    }
   }
 
   Serial.print("Local IP address: ");
@@ -66,19 +76,24 @@ void loop() {
     Serial.print(":");
     Serial.println(PORT);
     if (!client.connect(tallyIp, PORT)) {
-      Serial.println("Connection failed.");
-      delay(5000);
-      return;
+      Serial.println("Connection failed, restarting...");
+      ESP.restart();
     } else {
       Serial.println("Connection established.");
     }
-    client.write(LISTEN_INPUT);
+    uint8_t buf[] = {0xffu, 0x01u, LISTEN_INPUT};
+    client.write(buf, 3);
   }
 
-  while (client.available()) {
-    int state = client.read();
-    Serial.println(state);
-    switch (state) {
+  while (client.available() >= 2) {
+    uint8_t buf[2];
+    int res = client.read(buf, 2);
+    if (res < 2 || buf[0] != LISTEN_INPUT) {
+      Serial.println("Error during message read, restarting...");
+      ESP.restart();
+    }
+    Serial.println(buf[1]);
+    switch (buf[1]) {
       case INACTIVE:
         digitalWrite(PIN_PREVIEW, LOW);
         digitalWrite(PIN_PROGRAM, LOW);
@@ -89,6 +104,10 @@ void loop() {
         break;
       case PROGRAM:
         digitalWrite(PIN_PREVIEW, LOW);
+        digitalWrite(PIN_PROGRAM, HIGH);
+        break;
+      case PREVIEW_PROGRAM:
+        digitalWrite(PIN_PREVIEW, HIGH);
         digitalWrite(PIN_PROGRAM, HIGH);
         break;
     }

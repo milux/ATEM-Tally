@@ -1,5 +1,5 @@
 import { TallyState } from "./tallyState";
-import { Atem } from "atem-connection";
+import { Atem, AtemState } from "atem-connection";
 import { createServer, Socket } from "net";
 import { lookup } from "dns";
 
@@ -19,7 +19,7 @@ const legacyMap: Map<number, number> = new Map([
 
 atem.on('error', console.error);
 atem.on('info', console.log);
-atem.on('debug', console.log);
+// atem.on('debug', console.log);
 
 // Manually resolve IP address to prevent epic reconnect fuckup of atem-connect
 const doLookup = () => {
@@ -66,7 +66,8 @@ const getState = (input: number): TallyState => {
     }
 }
 
-const updateStates = () => {
+const updateStates = (state: AtemState, path: string[]) => {
+    console.log(`Update on path ${path}...`);
     const previewSet = new Set(atem.listVisibleInputs("preview"));
     const programSet = new Set(atem.listVisibleInputs("program"));
     // console.log("previews", previewSet);
@@ -136,7 +137,10 @@ atem.on('connected', () => {
                 sendState(input, lastStates.get(input)!, socket);
             });
             // Register echo-handler for keep-alive replies
-            socket.on('data', (data) => socket.write(data));
+            socket.on('data', (data) => {
+                console.log(`Reply to keep alive from ${clientIdent}: ${(data).toString('hex')}`);
+                socket.write(data);
+            });
         });
 
         socket.on('error', (err) => {
