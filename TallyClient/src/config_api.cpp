@@ -10,9 +10,9 @@ namespace config_api {
 
 namespace {
 
-constexpr uint8_t DEFAULT_LISTEN_INPUT = 2;
-constexpr uint16_t DEFAULT_KEEP_ALIVE_SECONDS = 5;
-constexpr uint16_t DEFAULT_RESTART_TIMEOUT_SECONDS = 30;
+constexpr uint8_t DEFAULT_LISTEN_INPUT = 1;
+constexpr uint16_t DEFAULT_KEEP_ALIVE_SECONDS = 10;
+constexpr uint16_t DEFAULT_RESTART_TIMEOUT_SECONDS = 60;
 constexpr const char* DEFAULT_SYSLOG_SERVER_DNS = "syslog.internal";
 
 const char* CONFIG_NAMESPACE = "tallycfg";
@@ -26,11 +26,11 @@ WebServer apiServer(80);
 Preferences preferences;
 ClientConfig* runtimeConfigPtr = nullptr;
 std::function<void()> onListenInputChangedCb;
-std::function<void()> onKeepAliveChangedCb;
+std::function<void()> onTimingSettingsChangedCb;
 std::function<void()> onSyslogServerChangedCb;
 
 void sendJsonResponse(int statusCode, const char* status, const char* message) {
-  StaticJsonDocument<192> response;
+  JsonDocument response;
   response["status"] = status;
   response["message"] = message;
   String body;
@@ -38,7 +38,7 @@ void sendJsonResponse(int statusCode, const char* status, const char* message) {
   apiServer.send(statusCode, "application/json", body);
 }
 
-bool parseRequestBody(StaticJsonDocument<192>& body) {
+bool parseRequestBody(JsonDocument& body) {
   if (!apiServer.hasArg("plain")) {
     sendJsonResponse(400, "error", "Missing request body");
     return false;
@@ -121,12 +121,12 @@ void handleSetPassword() {
     return;
   }
 
-  StaticJsonDocument<192> body;
+  JsonDocument body;
   if (!parseRequestBody(body)) {
     return;
   }
 
-  if (!body.containsKey("password") || !body["password"].is<const char*>()) {
+  if (!body["password"].is<const char*>()) {
     sendJsonResponse(400, "error", "Field 'password' must be a string");
     return;
   }
@@ -148,12 +148,12 @@ void handleSetListenInput() {
     return;
   }
 
-  StaticJsonDocument<192> body;
+  JsonDocument body;
   if (!parseRequestBody(body)) {
     return;
   }
 
-  if (!body.containsKey("listen_input") || !body["listen_input"].is<unsigned int>()) {
+  if (!body["listen_input"].is<unsigned int>()) {
     sendJsonResponse(400, "error", "Field 'listen_input' must be an integer");
     return;
   }
@@ -182,7 +182,7 @@ void handleGetListenInput() {
 
   ClientConfig& runtimeConfig = *runtimeConfigPtr;
 
-  StaticJsonDocument<192> response;
+  JsonDocument response;
   response["status"] = "ok";
   response["listen_input"] = runtimeConfig.listenInput;
   String body;
@@ -202,12 +202,12 @@ void handleSetKeepAliveSeconds() {
     return;
   }
 
-  StaticJsonDocument<192> body;
+  JsonDocument body;
   if (!parseRequestBody(body)) {
     return;
   }
 
-  if (!body.containsKey("keep_alive_seconds") || !body["keep_alive_seconds"].is<unsigned int>()) {
+  if (!body["keep_alive_seconds"].is<unsigned int>()) {
     sendJsonResponse(400, "error", "Field 'keep_alive_seconds' must be an integer");
     return;
   }
@@ -221,8 +221,8 @@ void handleSetKeepAliveSeconds() {
   runtimeConfig.keepAliveSeconds = static_cast<uint16_t>(keepAliveSeconds);
   preferences.putUShort(CONFIG_KEY_KEEP_ALIVE_SECONDS, runtimeConfig.keepAliveSeconds);
 
-  if (onKeepAliveChangedCb) {
-    onKeepAliveChangedCb();
+  if (onTimingSettingsChangedCb) {
+    onTimingSettingsChangedCb();
   }
 
   sendJsonResponse(200, "ok", "Keep-alive interval updated");
@@ -236,7 +236,7 @@ void handleGetKeepAliveSeconds() {
 
   ClientConfig& runtimeConfig = *runtimeConfigPtr;
 
-  StaticJsonDocument<192> response;
+  JsonDocument response;
   response["status"] = "ok";
   response["keep_alive_seconds"] = runtimeConfig.keepAliveSeconds;
   String body;
@@ -256,12 +256,12 @@ void handleSetRestartTimeoutSeconds() {
     return;
   }
 
-  StaticJsonDocument<192> body;
+  JsonDocument body;
   if (!parseRequestBody(body)) {
     return;
   }
 
-  if (!body.containsKey("restart_timeout_seconds") || !body["restart_timeout_seconds"].is<unsigned int>()) {
+  if (!body["restart_timeout_seconds"].is<unsigned int>()) {
     sendJsonResponse(400, "error", "Field 'restart_timeout_seconds' must be an integer");
     return;
   }
@@ -275,8 +275,8 @@ void handleSetRestartTimeoutSeconds() {
   runtimeConfig.restartTimeoutSeconds = static_cast<uint16_t>(restartTimeoutSeconds);
   preferences.putUShort(CONFIG_KEY_RESTART_TIMEOUT_SECONDS, runtimeConfig.restartTimeoutSeconds);
 
-  if (onKeepAliveChangedCb) {
-    onKeepAliveChangedCb();
+  if (onTimingSettingsChangedCb) {
+    onTimingSettingsChangedCb();
   }
 
   sendJsonResponse(200, "ok", "Restart timeout updated");
@@ -290,7 +290,7 @@ void handleGetRestartTimeoutSeconds() {
 
   ClientConfig& runtimeConfig = *runtimeConfigPtr;
 
-  StaticJsonDocument<192> response;
+  JsonDocument response;
   response["status"] = "ok";
   response["restart_timeout_seconds"] = runtimeConfig.restartTimeoutSeconds;
   String body;
@@ -310,12 +310,12 @@ void handleSetSyslogServerDns() {
     return;
   }
 
-  StaticJsonDocument<192> body;
+  JsonDocument body;
   if (!parseRequestBody(body)) {
     return;
   }
 
-  if (!body.containsKey("syslog_server") || !body["syslog_server"].is<const char*>()) {
+  if (!body["syslog_server"].is<const char*>()) {
     sendJsonResponse(400, "error", "Field 'syslog_server' must be a string");
     return;
   }
@@ -344,7 +344,7 @@ void handleGetSyslogServerDns() {
 
   ClientConfig& runtimeConfig = *runtimeConfigPtr;
 
-  StaticJsonDocument<192> response;
+  JsonDocument response;
   response["status"] = "ok";
   response["syslog_server"] = runtimeConfig.syslogServerDns;
   String body;
@@ -360,7 +360,7 @@ void handleNotFound() {
 
 void begin(ClientConfig* runtimeConfig,
            std::function<void()> onListenInputChanged,
-           std::function<void()> onKeepAliveChanged,
+           std::function<void()> onTimingSettingsChanged,
            std::function<void()> onSyslogServerChanged) {
   if (runtimeConfig == nullptr) {
     LogSerial.println("REST API init failed: runtime config pointer is null.");
@@ -372,7 +372,7 @@ void begin(ClientConfig* runtimeConfig,
 
   runtimeConfigPtr = runtimeConfig;
   onListenInputChangedCb = onListenInputChanged;
-  onKeepAliveChangedCb = onKeepAliveChanged;
+  onTimingSettingsChangedCb = onTimingSettingsChanged;
   onSyslogServerChangedCb = onSyslogServerChanged;
 
   const char* headerKeys[] = {"X-Api-Password"};

@@ -28,9 +28,19 @@ WiFiClient client;
 config_api::ClientConfig config;
 
 unsigned long lastKeepAliveSentAt = 0;
-unsigned long lastKeepAliveReplyAt = 0;
+unsigned long lastKeepAliveReplyAt = static_cast<unsigned long>(-1);
+unsigned short lastKeepAliveWarningRemainingSeconds = static_cast<unsigned short>(-1);
+
 unsigned long connectAttemptStartedAt = 0;
 unsigned long lastConnectAttemptAt = 0;
+
+unsigned long restartTimeoutMs = 0;
+unsigned long keepAliveIntervalMs = 0;
+
+static void updateTimingsFromConfig() {
+  restartTimeoutMs = static_cast<unsigned long>(config.restartTimeoutSeconds) * 1000UL;
+  keepAliveIntervalMs = static_cast<unsigned long>(config.keepAliveSeconds) * 1000UL;
+}
 
 static void printPartitionInfo(const esp_partition_t* partition, const char* prefix) {
   if (partition == nullptr) {
@@ -139,15 +149,15 @@ void setup() {
         lastConnectAttemptAt = 0;
       },
       []() {
-        const unsigned long now = millis();
-        lastKeepAliveSentAt = now;
-        lastKeepAliveReplyAt = now;
+        updateTimingsFromConfig();
         connectAttemptStartedAt = 0;
         lastConnectAttemptAt = 0;
       },
       []() {
         LogSerial.setSyslogServer(config.syslogServerDns);
       });
+
+  updateTimingsFromConfig();
 
   LogSerial.setSyslogServer(config.syslogServerDns);
 
@@ -185,7 +195,6 @@ void loop() {
     LogSerial.println(PORT);
 
     if (!client.connect(tallyIp, PORT)) {
-      const unsigned long restartTimeoutMs = static_cast<unsigned long>(config.restartTimeoutSeconds) * 1000UL;
       if (now - connectAttemptStartedAt >= restartTimeoutMs) {
         LogSerial.println("Connection timeout exceeded, restarting...");
         ESP.restart();
@@ -200,25 +209,11 @@ void loop() {
     uint8_t buf[] = {0xffu, 0x01u, config.listenInput};
     client.write(buf, 3);
     lastKeepAliveSentAt = now;
-    lastKeepAliveReplyAt = now;
+    lastKeepAliveReplyAt = static_cast<unsigned long>(-1);
+    lastKeepAliveWarningRemainingSeconds = static_cast<unsigned short>(-1);
   } else {
     const unsigned long now = millis();
-    const unsigned long restartTimeoutMs = static_cast<unsigned long>(config.restartTimeoutSeconds) * 1000UL;
 
-    // Handle keep-alive logic
-    const unsigned long keepAliveIntervalMs = static_cast<unsigned long>(config.keepAliveSeconds) * 1000UL;
-    if (now - lastKeepAliveSentAt >= keepAliveIntervalMs) {
-      uint8_t keepAlive[] = {0xffu, 0xffu};
-      client.write(keepAlive, 2);
-      lastKeepAliveSentAt = now;
-    }
-
-    if (now - lastKeepAliveReplyAt >= restartTimeoutMs) {
-      LogSerial.println("Keep-alive reply timeout exceeded, restarting...");
-      ESP.restart();
-    }
-
-    // Handle tally status messages
     while (client.available() >= 2) {
       uint8_t buf[2];
       int res = client.read(buf, 2);
@@ -256,6 +251,32 @@ void loop() {
           digitalWrite(PIN_PROGRAM, HIGH);
           break;
       }
+    }
+
+    if (lastKeepAliveReplyAt < lastKeepAliveSentAt && (lastKeepAliveSentAt - lastKeepAliveReplyAt >= keepAliveIntervalMs)) {
+      const unsigned long elapsedSinceReplyMs = now - lastKeepAliveReplyAt;
+      if (elapsedSinceReplyMs >= restartTimeoutMs) {
+        LogSerial.println("Keep-alive reply timeout exceeded, restarting...");
+        ESP.restart();
+      }
+
+      const unsigned long remainingMs = restartTimeoutMs - elapsedSinceReplyMs;
+      const unsigned short remainingSeconds = (remainingMs + 999UL) / 1000UL;
+      if (remainingSeconds != lastKeepAliveWarningRemainingSeconds) {
+        LogSerial.print("Warning: keep-alive reply missing; restart in ");
+        LogSerial.print(remainingSeconds);
+        LogSerial.println("s if no reply is received.");
+        lastKeepAliveWarningRemainingSeconds = remainingSeconds;
+      }
+    } else {
+      lastKeepAliveWarningRemainingSeconds = static_cast<unsigned short>(-1);
+    }
+
+    // Send keep-alive packages
+    if (now - lastKeepAliveSentAt >= keepAliveIntervalMs) {
+      uint8_t keepAlive[] = {0xffu, 0xffu};
+      client.write(keepAlive, 2);
+      lastKeepAliveSentAt = now;
     }
   }
 }
