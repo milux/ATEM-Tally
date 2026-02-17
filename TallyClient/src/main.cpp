@@ -7,6 +7,7 @@ extern "C" {
 }
 
 #include "config_api.h"
+#include "log_output.h"
 #include "ota_push.h"
 #include "ota_signature.h"
 
@@ -33,11 +34,11 @@ unsigned long lastConnectAttemptAt = 0;
 
 static void printPartitionInfo(const esp_partition_t* partition, const char* prefix) {
   if (partition == nullptr) {
-    Serial.printf("%s<none>\n", prefix);
+    LogSerial.printf("%s<none>\n", prefix);
     return;
   }
 
-  Serial.printf(
+  LogSerial.printf(
       "%slabel=%s subtype=%d address=0x%08x size=0x%08x\n",
       prefix,
       partition->label,
@@ -47,7 +48,7 @@ static void printPartitionInfo(const esp_partition_t* partition, const char* pre
 }
 
 static void printOtaPartitionDiagnostics() {
-  Serial.println("OTA: partition diagnostics");
+  LogSerial.println("OTA: partition diagnostics");
 
   const esp_partition_t* running = esp_ota_get_running_partition();
   printPartitionInfo(running, "  running: ");
@@ -64,7 +65,7 @@ static void printOtaPartitionDiagnostics() {
   while (iterator != nullptr) {
     const esp_partition_t* partition = esp_partition_get(iterator);
     ++appPartitionCount;
-    Serial.printf(
+    LogSerial.printf(
         "  app[%d]: label=%s subtype=%d address=0x%08x size=0x%08x\n",
         appPartitionCount,
         partition->label,
@@ -74,17 +75,17 @@ static void printOtaPartitionDiagnostics() {
     iterator = esp_partition_next(iterator);
   }
 
-  Serial.printf("  app partitions: %d\n", appPartitionCount);
+  LogSerial.printf("  app partitions: %d\n", appPartitionCount);
 }
 
 void setup() {
   pinMode(PIN_PREVIEW, OUTPUT);
   pinMode(PIN_PROGRAM, OUTPUT);
 
-  Serial.begin(115200);
+  LogSerial.begin(115200);
 
-  Serial.println();
-  Serial.println();
+  LogSerial.println();
+  LogSerial.println();
 
   printOtaPartitionDiagnostics();
 
@@ -94,39 +95,39 @@ void setup() {
     for (int i = 0; i < n; ++i) {
       if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
         String ssid = WiFi.SSID(i);
-        Serial.print("Trying open network ");
-        Serial.print(ssid);
+        LogSerial.print("Trying open network ");
+        LogSerial.print(ssid);
         WiFi.begin(ssid.c_str());
         // ~ 5 seconds WiFi connect timeout
         for (int i = 0; WiFi.status() != WL_CONNECTED && i < 50; ++i) {
           delay(100);
-          Serial.print(".");
+          LogSerial.print(".");
         }
         if (WiFi.status() == WL_CONNECTED) {
-          Serial.println(" connected!");
+          LogSerial.println(" connected!");
           int res = WiFi.hostByName(TALLY_DNS, tallyIp);
           if (res == 1) {
-            Serial.print("Found IP address: ");
-            Serial.println(tallyIp);
+            LogSerial.print("Tally Server IP address found: ");
+            LogSerial.println(tallyIp);
             scanSuccessful = true;
             break;
           } else {
-            Serial.print("Error code: ");
-            Serial.println(res);
+            LogSerial.print("Error code: ");
+            LogSerial.println(res);
           }
         } else {
-          Serial.println(" timed out, skipping...");
+          LogSerial.println(" timed out, skipping...");
           continue;
         }
       } else {
-        Serial.print("Skipping encrypted network ");
-        Serial.println(WiFi.SSID(i));
+        LogSerial.print("Skipping encrypted network ");
+        LogSerial.println(WiFi.SSID(i));
       }
     }
   }
 
-  Serial.print("Local IP address: ");
-  Serial.println(WiFi.localIP());
+  LogSerial.print("Local IP address: ");
+  LogSerial.println(WiFi.localIP());
 
   config_api::begin(
       &config,
@@ -143,7 +144,12 @@ void setup() {
         lastKeepAliveReplyAt = now;
         connectAttemptStartedAt = 0;
         lastConnectAttemptAt = 0;
+      },
+      []() {
+        LogSerial.setSyslogServer(config.syslogServerDns);
       });
+
+  LogSerial.setSyslogServer(config.syslogServerDns);
 
   ota_signature::confirmPendingOtaImage();
 
@@ -173,20 +179,20 @@ void loop() {
     }
     lastConnectAttemptAt = now;
 
-    Serial.print("Connecting to ");
-    Serial.print(tallyIp);
-    Serial.print(":");
-    Serial.println(PORT);
+    LogSerial.print("Connecting to ");
+    LogSerial.print(tallyIp);
+    LogSerial.print(":");
+    LogSerial.println(PORT);
 
     if (!client.connect(tallyIp, PORT)) {
       const unsigned long restartTimeoutMs = static_cast<unsigned long>(config.restartTimeoutSeconds) * 1000UL;
       if (now - connectAttemptStartedAt >= restartTimeoutMs) {
-        Serial.println("Connection timeout exceeded, restarting...");
+        LogSerial.println("Connection timeout exceeded, restarting...");
         ESP.restart();
       }
       return;
     } else {
-      Serial.println("Connection established.");
+      LogSerial.println("Connection established.");
     }
     connectAttemptStartedAt = 0;
     lastConnectAttemptAt = 0;
@@ -208,7 +214,7 @@ void loop() {
     }
 
     if (now - lastKeepAliveReplyAt >= restartTimeoutMs) {
-      Serial.println("Keep-alive reply timeout exceeded, restarting...");
+      LogSerial.println("Keep-alive reply timeout exceeded, restarting...");
       ESP.restart();
     }
 
@@ -217,7 +223,7 @@ void loop() {
       uint8_t buf[2];
       int res = client.read(buf, 2);
       if (res < 2) {
-        Serial.println("Error during message read, restarting...");
+        LogSerial.println("Error during message read, restarting...");
         ESP.restart();
       }
 
@@ -227,11 +233,11 @@ void loop() {
       }
 
       if (buf[0] != config.listenInput) {
-        Serial.println("Unexpected input in message read, ignoring...");
+        LogSerial.println("Unexpected input in message read, ignoring...");
         continue;
       }
 
-      Serial.println(buf[1]);
+      LogSerial.println(buf[1]);
       switch (buf[1]) {
         case INACTIVE:
           digitalWrite(PIN_PREVIEW, LOW);

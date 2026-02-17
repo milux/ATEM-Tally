@@ -4,6 +4,8 @@
 #include <Preferences.h>
 #include <WebServer.h>
 
+#include "log_output.h"
+
 namespace config_api {
 
 namespace {
@@ -11,18 +13,21 @@ namespace {
 constexpr uint8_t DEFAULT_LISTEN_INPUT = 2;
 constexpr uint16_t DEFAULT_KEEP_ALIVE_SECONDS = 5;
 constexpr uint16_t DEFAULT_RESTART_TIMEOUT_SECONDS = 30;
+constexpr const char* DEFAULT_SYSLOG_SERVER_DNS = "syslog.internal";
 
 const char* CONFIG_NAMESPACE = "tallycfg";
 const char* CONFIG_KEY_PASSWORD = "api_pwd";
 const char* CONFIG_KEY_LISTEN_INPUT = "listen_in";
 const char* CONFIG_KEY_KEEP_ALIVE_SECONDS = "keep_sec";
 const char* CONFIG_KEY_RESTART_TIMEOUT_SECONDS = "rst_sec";
+const char* CONFIG_KEY_SYSLOG_SERVER_DNS = "syslog_dns";
 
 WebServer apiServer(80);
 Preferences preferences;
 ClientConfig* runtimeConfigPtr = nullptr;
 std::function<void()> onListenInputChangedCb;
 std::function<void()> onKeepAliveChangedCb;
+std::function<void()> onSyslogServerChangedCb;
 
 void sendJsonResponse(int statusCode, const char* status, const char* message) {
   StaticJsonDocument<192> response;
@@ -80,6 +85,8 @@ void loadConfig(ClientConfig& runtimeConfig) {
       preferences.getUShort(CONFIG_KEY_KEEP_ALIVE_SECONDS, DEFAULT_KEEP_ALIVE_SECONDS);
   runtimeConfig.restartTimeoutSeconds =
       preferences.getUShort(CONFIG_KEY_RESTART_TIMEOUT_SECONDS, DEFAULT_RESTART_TIMEOUT_SECONDS);
+  runtimeConfig.syslogServerDns =
+      preferences.getString(CONFIG_KEY_SYSLOG_SERVER_DNS, DEFAULT_SYSLOG_SERVER_DNS);
 
   if (runtimeConfig.keepAliveSeconds == 0) {
     runtimeConfig.keepAliveSeconds = DEFAULT_KEEP_ALIVE_SECONDS;
@@ -94,6 +101,11 @@ void loadConfig(ClientConfig& runtimeConfig) {
   if (runtimeConfig.restartTimeoutSeconds == 0) {
     runtimeConfig.restartTimeoutSeconds = DEFAULT_RESTART_TIMEOUT_SECONDS;
     preferences.putUShort(CONFIG_KEY_RESTART_TIMEOUT_SECONDS, runtimeConfig.restartTimeoutSeconds);
+  }
+
+  if (runtimeConfig.syslogServerDns.isEmpty()) {
+    runtimeConfig.syslogServerDns = DEFAULT_SYSLOG_SERVER_DNS;
+    preferences.putString(CONFIG_KEY_SYSLOG_SERVER_DNS, runtimeConfig.syslogServerDns);
   }
 }
 
@@ -286,6 +298,60 @@ void handleGetRestartTimeoutSeconds() {
   apiServer.send(200, "application/json", body);
 }
 
+void handleSetSyslogServerDns() {
+  if (runtimeConfigPtr == nullptr) {
+    sendJsonResponse(500, "error", "Configuration API not initialized");
+    return;
+  }
+
+  ClientConfig& runtimeConfig = *runtimeConfigPtr;
+
+  if (!requireApiAccess(runtimeConfig)) {
+    return;
+  }
+
+  StaticJsonDocument<192> body;
+  if (!parseRequestBody(body)) {
+    return;
+  }
+
+  if (!body.containsKey("syslog_server") || !body["syslog_server"].is<const char*>()) {
+    sendJsonResponse(400, "error", "Field 'syslog_server' must be a string");
+    return;
+  }
+
+  const String syslogServerDns = String(body["syslog_server"].as<const char*>());
+  if (syslogServerDns.isEmpty() || syslogServerDns.length() > 253) {
+    sendJsonResponse(400, "error", "Field 'syslog_server' must be between 1 and 253 characters");
+    return;
+  }
+
+  runtimeConfig.syslogServerDns = syslogServerDns;
+  preferences.putString(CONFIG_KEY_SYSLOG_SERVER_DNS, runtimeConfig.syslogServerDns);
+
+  if (onSyslogServerChangedCb) {
+    onSyslogServerChangedCb();
+  }
+
+  sendJsonResponse(200, "ok", "Syslog server updated");
+}
+
+void handleGetSyslogServerDns() {
+  if (runtimeConfigPtr == nullptr) {
+    sendJsonResponse(500, "error", "Configuration API not initialized");
+    return;
+  }
+
+  ClientConfig& runtimeConfig = *runtimeConfigPtr;
+
+  StaticJsonDocument<192> response;
+  response["status"] = "ok";
+  response["syslog_server"] = runtimeConfig.syslogServerDns;
+  String body;
+  serializeJson(response, body);
+  apiServer.send(200, "application/json", body);
+}
+
 void handleNotFound() {
   sendJsonResponse(404, "error", "Endpoint not found");
 }
@@ -294,9 +360,10 @@ void handleNotFound() {
 
 void begin(ClientConfig* runtimeConfig,
            std::function<void()> onListenInputChanged,
-           std::function<void()> onKeepAliveChanged) {
+           std::function<void()> onKeepAliveChanged,
+           std::function<void()> onSyslogServerChanged) {
   if (runtimeConfig == nullptr) {
-    Serial.println("REST API init failed: runtime config pointer is null.");
+    LogSerial.println("REST API init failed: runtime config pointer is null.");
     return;
   }
 
@@ -306,6 +373,7 @@ void begin(ClientConfig* runtimeConfig,
   runtimeConfigPtr = runtimeConfig;
   onListenInputChangedCb = onListenInputChanged;
   onKeepAliveChangedCb = onKeepAliveChanged;
+  onSyslogServerChangedCb = onSyslogServerChanged;
 
   const char* headerKeys[] = {"X-Api-Password"};
   apiServer.collectHeaders(headerKeys, 1);
@@ -317,10 +385,12 @@ void begin(ClientConfig* runtimeConfig,
   apiServer.on("/api/keep-alive", HTTP_GET, handleGetKeepAliveSeconds);
   apiServer.on("/api/restart-timeout", HTTP_POST, handleSetRestartTimeoutSeconds);
   apiServer.on("/api/restart-timeout", HTTP_GET, handleGetRestartTimeoutSeconds);
+  apiServer.on("/api/syslog-server", HTTP_POST, handleSetSyslogServerDns);
+  apiServer.on("/api/syslog-server", HTTP_GET, handleGetSyslogServerDns);
   apiServer.onNotFound(handleNotFound);
 
   apiServer.begin();
-  Serial.println("REST API server started on port 80.");
+  LogSerial.println("REST API server started on port 80.");
 }
 
 void handleClient() {

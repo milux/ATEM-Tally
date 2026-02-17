@@ -22,7 +22,7 @@ The API uses a configured password.
 Rules:
 
 - If no password is set yet, `POST /api/password` is allowed without authentication.
-- `GET /api/listen-input`, `GET /api/keep-alive`, and `GET /api/restart-timeout` are public (no authentication required).
+- `GET /api/listen-input`, `GET /api/keep-alive`, `GET /api/restart-timeout`, and `GET /api/syslog-server` are public (no authentication required).
 - After password is set, all other documented endpoints require authentication.
 
 ## Endpoints
@@ -222,6 +222,63 @@ Example:
 
 ```bash
 curl -X GET http://192.168.44.172/api/restart-timeout
+```
+
+---
+
+### 8) Set syslog server DNS
+
+- **Method:** `POST`
+- **Path:** `/api/syslog-server`
+- **Auth:** required (unless initial password is still unset)
+- **Body:**
+
+```json
+{
+  "syslog_server": "syslog.internal"
+}
+```
+
+- **Constraints:** `syslog_server` must be a string with length `1..253`.
+- **Default:** `syslog.internal`
+- **Success response (200):**
+
+```json
+{
+  "status": "ok",
+  "message": "Syslog server updated"
+}
+```
+
+Example:
+
+```bash
+curl -X POST http://192.168.44.172/api/syslog-server \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Password: my-secret" \
+  -d '{"syslog_server":"syslog.internal"}'
+```
+
+---
+
+### 9) Get syslog server DNS
+
+- **Method:** `GET`
+- **Path:** `/api/syslog-server`
+- **Auth:** not required
+- **Success response (200):**
+
+```json
+{
+  "status": "ok",
+  "syslog_server": "syslog.internal"
+}
+```
+
+Example:
+
+```bash
+curl -X GET http://192.168.44.172/api/syslog-server
 ```
 
 ## Common error responses

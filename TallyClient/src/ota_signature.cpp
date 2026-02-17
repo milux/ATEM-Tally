@@ -11,6 +11,7 @@ extern "C" {
 }
 
 #include "ota_signing_public_key.h"
+#include "log_output.h"
 
 namespace ota_signature {
 
@@ -169,7 +170,7 @@ bool readFooterAtOffset(
   }
 
   if (footerOffset + sizeof(OtaSignatureFooter) > partition->size) {
-    Serial.printf(
+    LogSerial.printf(
         "OTA: %s direct footer offset out of range: offset=0x%08x footer=0x%08x partition=0x%08x\n",
         context,
         static_cast<unsigned>(footerOffset),
@@ -179,22 +180,22 @@ bool readFooterAtOffset(
   }
 
   if (!readPartition(partition, footerOffset, footer, sizeof(OtaSignatureFooter))) {
-    Serial.printf("OTA: %s direct footer read failed at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
+    LogSerial.printf("OTA: %s direct footer read failed at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
     return false;
   }
 
   if (memcmp(footer->magic, kMagic, sizeof(kMagic)) != 0) {
-    Serial.printf("OTA: %s direct footer magic mismatch at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
+    LogSerial.printf("OTA: %s direct footer magic mismatch at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
     return false;
   }
 
   if (memcmp(footer->endMagic, kEndMagic, sizeof(kEndMagic)) != 0) {
-    Serial.printf("OTA: %s direct footer end-magic mismatch at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
+    LogSerial.printf("OTA: %s direct footer end-magic mismatch at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
     return false;
   }
 
   if (footer->imageLength != footerOffset) {
-    Serial.printf(
+    LogSerial.printf(
         "OTA: %s direct footer imageLength mismatch: imageLength=0x%08x expected=0x%08x\n",
         context,
         static_cast<unsigned>(footer->imageLength),
@@ -247,7 +248,7 @@ bool calculateSha256(
 }
 
 bool rollbackAndReboot() {
-  Serial.println("OTA signature verification failed. Rolling back...");
+  LogSerial.println("OTA signature verification failed. Rolling back...");
   return esp_ota_mark_app_invalid_rollback_and_reboot() == ESP_OK;
 }
 
@@ -256,11 +257,11 @@ bool verifyPartitionSignature(
   const char* context,
   size_t expectedSignedLength) {
   if (partition == nullptr) {
-    Serial.printf("OTA: %s partition unavailable\n", context);
+    LogSerial.printf("OTA: %s partition unavailable\n", context);
     return false;
   }
 
-  Serial.printf(
+  LogSerial.printf(
       "OTA: %s partition details: label=%s subtype=%d address=0x%08x size=0x%08x\n",
       context,
       partition->label,
@@ -273,13 +274,13 @@ bool verifyPartitionSignature(
   bool footerFound = false;
 
   if (expectedSignedLength > 0) {
-    Serial.printf(
+    LogSerial.printf(
         "OTA: %s expected signed length from transport: %u bytes\n",
         context,
         static_cast<unsigned>(expectedSignedLength));
 
     if (expectedSignedLength < sizeof(OtaSignatureFooter)) {
-      Serial.printf(
+        LogSerial.printf(
           "OTA: %s expected length too small for footer (%u < %u)\n",
           context,
           static_cast<unsigned>(expectedSignedLength),
@@ -293,8 +294,8 @@ bool verifyPartitionSignature(
   if (!footerFound) {
     FooterScanStats stats;
     if (!findSignatureFooter(partition, &footer, &footerOffset, &stats)) {
-      Serial.printf("OTA: %s signature footer not found\n", context);
-      Serial.printf(
+        LogSerial.printf("OTA: %s signature footer not found\n", context);
+        LogSerial.printf(
           "OTA: %s scan stats offsets=%u magic_hits=%u read_fail=%u bad_magic=%u bad_end=%u bad_len=%u bad_digest=%u accepted=%u\n",
           context,
           static_cast<unsigned>(stats.offsetsScanned),
@@ -308,26 +309,26 @@ bool verifyPartitionSignature(
       return false;
     }
 
-    Serial.printf("OTA: %s footer found by scan fallback at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
+    LogSerial.printf("OTA: %s footer found by scan fallback at offset=0x%08x\n", context, static_cast<unsigned>(footerOffset));
   }
 
   uint8_t digest[kDigestSize];
   if (!calculateSha256(partition, footer.imageLength, digest)) {
-    Serial.printf("OTA: %s failed to calculate SHA-256\n", context);
+    LogSerial.printf("OTA: %s failed to calculate SHA-256\n", context);
     return false;
   }
 
   if (memcmp(digest, footer.sha256, sizeof(digest)) != 0) {
-    Serial.printf("OTA: %s SHA-256 mismatch\n", context);
+    LogSerial.printf("OTA: %s SHA-256 mismatch\n", context);
     return false;
   }
 
   if (!Ed25519::verify(footer.signature, ota_signing::kPublicKey, footer.sha256, sizeof(footer.sha256))) {
-    Serial.printf("OTA: %s Ed25519 signature verification failed\n", context);
+    LogSerial.printf("OTA: %s Ed25519 signature verification failed\n", context);
     return false;
   }
 
-  Serial.printf(
+  LogSerial.printf(
       "OTA: %s signature verified (partition=%s footer=0x%08x)\n",
       context,
       partition->label,
@@ -342,24 +343,24 @@ bool verifyStagedOtaImage(size_t stagedImageLength) {
   const esp_partition_t* boot = esp_ota_get_boot_partition();
 
   if (running == nullptr || boot == nullptr) {
-    Serial.println("OTA: unable to inspect running/boot partition for staged verification");
+    LogSerial.println("OTA: unable to inspect running/boot partition for staged verification");
     return false;
   }
 
   if (boot == running) {
-    Serial.println("OTA: no staged image found for pre-reboot verification");
+    LogSerial.println("OTA: no staged image found for pre-reboot verification");
     return false;
   }
 
-  Serial.printf("OTA: pre-reboot verification of staged image in partition '%s'\n", boot->label);
+  LogSerial.printf("OTA: pre-reboot verification of staged image in partition '%s'\n", boot->label);
   if (verifyPartitionSignature(boot, "staged image", stagedImageLength)) {
     return true;
   }
 
   if (esp_ota_set_boot_partition(running) == ESP_OK) {
-    Serial.printf("OTA: reverted boot partition to current image '%s'\n", running->label);
+    LogSerial.printf("OTA: reverted boot partition to current image '%s'\n", running->label);
   } else {
-    Serial.println("OTA: failed to revert boot partition after staged verification failure");
+    LogSerial.println("OTA: failed to revert boot partition after staged verification failure");
   }
 
   return false;
@@ -368,13 +369,13 @@ bool verifyStagedOtaImage(size_t stagedImageLength) {
 bool confirmPendingOtaImage() {
   const esp_partition_t* running = esp_ota_get_running_partition();
   if (running == nullptr) {
-    Serial.println("OTA: running partition unavailable");
+    LogSerial.println("OTA: running partition unavailable");
     return false;
   }
 
   esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
   if (esp_ota_get_state_partition(running, &state) != ESP_OK) {
-    Serial.println("OTA: unable to read image state");
+    LogSerial.println("OTA: unable to read image state");
     return false;
   }
 
@@ -382,7 +383,7 @@ bool confirmPendingOtaImage() {
     return true;
   }
 
-  Serial.println("OTA: pending verify, validating SHA-256 + Ed25519 signature...");
+  LogSerial.println("OTA: pending verify, validating SHA-256 + Ed25519 signature...");
 
   if (!verifyPartitionSignature(running, "pending image", 0)) {
     rollbackAndReboot();
@@ -390,11 +391,11 @@ bool confirmPendingOtaImage() {
   }
 
   if (esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
-    Serial.println("OTA: failed to mark app valid");
+    LogSerial.println("OTA: failed to mark app valid");
     return false;
   }
 
-  Serial.println("OTA: pending image signature verified, image confirmed");
+  LogSerial.println("OTA: pending image signature verified, image confirmed");
   return true;
 }
 
