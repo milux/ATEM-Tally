@@ -5,3 +5,9 @@
 /include
 /lib
 /test
+
+# Local signing material (never commit private keys)
+/keys
+
+# Generated files
+/sdkconfig.az*
