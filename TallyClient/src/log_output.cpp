@@ -19,6 +19,10 @@ void LogOutput::begin(unsigned long baudRate) {
   ::Serial.begin(baudRate);
 }
 
+void LogOutput::flush() {
+  flushQueuedLines();
+}
+
 void LogOutput::setSyslogServer(const String& serverDns) {
   if (serverDns == syslogServerDns_) {
     return;
@@ -27,6 +31,10 @@ void LogOutput::setSyslogServer(const String& serverDns) {
   syslogServerDns_ = serverDns;
   syslogServerResolved_ = false;
   lastResolveAttemptMs_ = 0;
+}
+
+void LogOutput::setListenInput(uint8_t listenInput) {
+  listenInput_ = listenInput;
 }
 
 const String& LogOutput::getSyslogServer() const {
@@ -48,39 +56,79 @@ size_t LogOutput::write(const uint8_t* buffer, size_t size) {
 }
 
 void LogOutput::mirrorChar(char c) {
-  if (bufferedLine_.length() < MAX_BUFFERED_LOG_LINE && c != '\n' && c != '\r') {
-    bufferedLine_ += c;
-  } else {
-    // If the line exceeds the max length, also flush it to avoid
-    // information loss and start a new line.
+  if (c == '\n' || c == '\r') {
     flushBufferedLine();
-    // If the character is not a newline, add it to the new line buffer.
-    if (c != '\n' && c != '\r') {
-      bufferedLine_ += c;
+    return;
+  }
+
+  if (bufferedLine_.length() < MAX_BUFFERED_LOG_LINE) {
+    bufferedLine_ += c;
+    return;
+  }
+
+  // If the line exceeds the max length, flush it and continue with a new line.
+  flushBufferedLine();
+  bufferedLine_ += c;
+}
+
+void LogOutput::enqueueLine(const String& line) {
+  if (line.isEmpty()) {
+    return;
+  }
+
+  const size_t tail = (queuedHead_ + queuedCount_) % MAX_BUFFERED_LOG_LINES;
+  queuedLines_[tail] = line;
+
+  if (queuedCount_ < MAX_BUFFERED_LOG_LINES) {
+    ++queuedCount_;
+    return;
+  }
+
+  // Queue full: drop the oldest line to keep most recent messages.
+  queuedHead_ = (queuedHead_ + 1) % MAX_BUFFERED_LOG_LINES;
+}
+
+bool LogOutput::sendLine(const String& line) {
+  if (!syslogUdp.beginPacket(syslogServerIp_, SYSLOG_PORT)) {
+    return false;
+  }
+
+  syslogUdp.print("<14>tallyclient-");
+  syslogUdp.print(listenInput_);
+  syslogUdp.print(": ");
+  syslogUdp.print(line);
+  syslogUdp.print('\n');
+
+  return syslogUdp.endPacket() == 1;
+}
+
+void LogOutput::flushQueuedLines() {
+  // Only attempt to send if connected to WiFi, a listen input is set,
+  // and the syslog server is resolved.
+  if (WiFi.status() != WL_CONNECTED || listenInput_ == 255 || !ensureSyslogServerResolved()) {
+    return;
+  }
+
+  while (queuedCount_ > 0) {
+    const String& line = queuedLines_[queuedHead_];
+    if (!sendLine(line)) {
+      return;
     }
+
+    queuedLines_[queuedHead_] = "";
+    queuedHead_ = (queuedHead_ + 1) % MAX_BUFFERED_LOG_LINES;
+    --queuedCount_;
   }
 }
 
 void LogOutput::flushBufferedLine() {
   bufferedLine_.trim();
-  if (bufferedLine_.isEmpty()) {
-    bufferedLine_ = "";
-    return;
-  }
-
-  if (WiFi.status() != WL_CONNECTED || !ensureSyslogServerResolved()) {
-    bufferedLine_ = "";
-    return;
-  }
-
-  if (syslogUdp.beginPacket(syslogServerIp_, SYSLOG_PORT)) {
-    syslogUdp.print("<14>tallyclient: ");
-    syslogUdp.print(bufferedLine_);
-    syslogUdp.print('\n');
-    syslogUdp.endPacket();
+  if (!bufferedLine_.isEmpty()) {
+    enqueueLine(bufferedLine_);
   }
 
   bufferedLine_ = "";
+  flushQueuedLines();
 }
 
 bool LogOutput::ensureSyslogServerResolved() {

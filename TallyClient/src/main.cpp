@@ -142,6 +142,7 @@ void setup() {
   config_api::begin(
       &config,
       []() {
+        LogSerial.setListenInput(config.listenInput);
         if (client.connected()) {
           client.stop();
         }
@@ -159,6 +160,7 @@ void setup() {
 
   updateTimingsFromConfig();
 
+  LogSerial.setListenInput(config.listenInput);
   LogSerial.setSyslogServer(config.syslogServerDns);
 
   ota_signature::confirmPendingOtaImage();
@@ -168,6 +170,8 @@ void setup() {
 
 // the loop function runs over and over again forever
 void loop() {
+  LogSerial.flush();
+
   ota::handlePushOta();
 
   // Restarts forbidden during OTA update
