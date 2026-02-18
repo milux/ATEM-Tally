@@ -48,12 +48,16 @@ size_t LogOutput::write(const uint8_t* buffer, size_t size) {
 }
 
 void LogOutput::mirrorChar(char c) {
-  if (bufferedLine_.length() < MAX_BUFFERED_LOG_LINE) {
+  if (bufferedLine_.length() < MAX_BUFFERED_LOG_LINE && c != '\n' && c != '\r') {
     bufferedLine_ += c;
-  }
-
-  if (c == '\n' || c == '\r') {
+  } else {
+    // If the line exceeds the max length, also flush it to avoid
+    // information loss and start a new line.
     flushBufferedLine();
+    // If the character is not a newline, add it to the new line buffer.
+    if (c != '\n' && c != '\r') {
+      bufferedLine_ += c;
+    }
   }
 }
 
@@ -69,12 +73,10 @@ void LogOutput::flushBufferedLine() {
     return;
   }
 
-  String payload = "<14>tallyclient: ";
-  payload += bufferedLine_;
-  payload += "\n";
-
   if (syslogUdp.beginPacket(syslogServerIp_, SYSLOG_PORT)) {
-    syslogUdp.print(payload);
+    syslogUdp.print("<14>tallyclient: ");
+    syslogUdp.print(bufferedLine_);
+    syslogUdp.print('\n');
     syslogUdp.endPacket();
   }
 
